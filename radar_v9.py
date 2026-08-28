@@ -112,128 +112,94 @@ def main():
         prev_price = previous.get(symbol, {}).get("price")
         changed = prev is not None and prev != z
 
-        # Cambio diario aproximado respecto a la última ejecución del radar.
         change_pct = None
         if price is not None and prev_price not in (None, 0):
             change_pct = (price - prev_price) / prev_price * 100
 
-        rows.append(
-            (name, symbol, ccy, strong, buy, reduce, sell,
-             in_portfolio, note, price, z, prev, changed, change_pct)
-        )
-        new_state[symbol] = {
-            "zone": z,
-            "price": price,
-            "updated": datetime.now().isoformat()
-        }
+        rows.append((name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,
+                     price,z,prev,changed,change_pct))
+        new_state[symbol] = {"zone":z,"price":price,"updated":datetime.now().isoformat()}
 
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
-    msg = [f"<b>RADAR V9 — ALERTAS IMPORTANTES</b>\n{now}\n"]
+    msg = [f"<b>RADAR DIARIO V9 — 79 EMPRESAS</b>\n{now}"]
 
-    # 1) Solo COMPRA FUERTE como señal de entrada.
-    strong_buy = [r for r in rows if r[10] == "COMPRA_FUERTE"]
-    strong_buy.sort(key=lambda r: (not r[7], r[0]))
-
-    newly_strong = [
-        r for r in strong_buy
-        if r[11] not in ("COMPRA_FUERTE", None)
-    ]
-
-    if newly_strong:
-        msg.append("<b>🚨 NUEVA COMPRA FUERTE</b>")
-        for r in newly_strong:
-            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
-            mark = " 📌 CARTERA" if in_portfolio else ""
-            discount = ((strong - price) / strong * 100) if strong and price is not None else None
-            extra = f" | {abs(discount):.1f}% por debajo del umbral" if discount is not None and discount >= 0 else ""
-            msg.append(
-                f"• <b>{name}</b>{mark} — {fmt(price,ccy)}\n"
-                f"  Compra fuerte ≤ {fmt(strong,ccy)}{extra}"
-            )
-
-    # Seguimos mostrando las que YA están en compra fuerte para que no se pierdan.
-    existing_strong = [
-        r for r in strong_buy
-        if r[11] == "COMPRA_FUERTE" or r[11] is None
-    ]
-    if existing_strong:
-        msg.append("\n<b>🟢 SIGUEN EN COMPRA FUERTE</b>")
-        for r in existing_strong:
+    # CAMBIOS DE ZONA
+    changes = [r for r in rows if r[12] and r[10] not in ("SIN_UMBRAL","SIN_COTIZACION")]
+    if changes:
+        changes.sort(key=lambda r:(not r[7], r[0]))
+        msg.append("\n<b>🔔 CAMBIOS DE ZONA</b>")
+        for r in changes:
             name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
             mark = " 📌" if in_portfolio else ""
-            msg.append(
-                f"• {name}{mark}: {fmt(price,ccy)} | umbral ≤ {fmt(strong,ccy)}"
-            )
+            msg.append(f"• <b>{name}</b>{mark}: {ZONE_LABELS.get(prev,prev)} → {ZONE_LABELS[z]} | {fmt(price,ccy)}")
 
-    # 2) Posiciones en cartera: alertas defensivas.
-    # La valoración por sobreprecio (REDUCIR/VENTA) sí puede ser señal directa.
-    portfolio_reduce_sell = [
-        r for r in rows
-        if r[7] and r[10] in ("REDUCIR","VENTA")
-    ]
-    if portfolio_reduce_sell:
-        msg.append("\n<b>⚠️ CARTERA — REDUCIR / VENDER POR VALORACIÓN</b>")
-        for r in portfolio_reduce_sell:
+    # COMPRA FUERTE
+    strong_rows = [r for r in rows if r[10] == "COMPRA_FUERTE"]
+    if strong_rows:
+        msg.append("\n<b>🚨 COMPRA FUERTE</b>")
+        for r in sorted(strong_rows, key=lambda r:(not r[7],r[0])):
             name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
-            threshold = sell if z == "VENTA" else reduce
-            msg.append(
-                f"• <b>{name}</b> — {fmt(price,ccy)} — {ZONE_LABELS[z]}\n"
-                f"  Umbral: {fmt(threshold,ccy)}"
-            )
+            mark = " 📌 CARTERA" if in_portfolio else ""
+            msg.append(f"• <b>{name}</b>{mark}: {fmt(price,ccy)} | fuerte ≤ {fmt(strong,ccy)}")
 
-    # 3) Caídas fuertes en posiciones de cartera.
-    # NO ordenamos vender solo por precio: activamos revisión defensiva.
-    portfolio_falls = [
-        r for r in rows
-        if r[7] and r[13] is not None and r[13] <= -7.0
-    ]
-    if portfolio_falls:
-        portfolio_falls.sort(key=lambda r: r[13])
-        msg.append("\n<b>🛡️ CARTERA — CAÍDA FUERTE / REVISAR TESIS</b>")
-        for r in portfolio_falls:
-            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
-            msg.append(
-                f"• <b>{name}</b> — {fmt(price,ccy)} — {change_pct:.1f}% desde la última revisión\n"
-                f"  Revisar resultados/noticias y tesis V9 antes de decidir vender."
-            )
-
-    # 4) Empresas muy cerca de Compra Fuerte (máx. 5), no de compra normal.
-    near_strong = []
+    # CERCA COMPRA FUERTE <=10%
+    near = []
     for r in rows:
         name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
         if price is not None and strong is not None and price > strong:
-            d = (price - strong) / strong * 100
+            d = (price-strong)/strong*100
             if d <= 10:
-                near_strong.append((d, r))
-    near_strong.sort(key=lambda x: x[0])
-    near_strong = near_strong[:5]
-
-    if near_strong:
+                near.append((d,r))
+    near.sort(key=lambda x:x[0])
+    if near:
         msg.append("\n<b>🎯 CERCA DE COMPRA FUERTE</b>")
-        for d,r in near_strong:
+        for d,r in near[:8]:
             name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
             mark = " 📌" if in_portfolio else ""
-            msg.append(
-                f"• {name}{mark}: {fmt(price,ccy)} | fuerte ≤ {fmt(strong,ccy)} | +{d:.1f}%"
-            )
+            msg.append(f"• {name}{mark}: {fmt(price,ccy)} | fuerte ≤ {fmt(strong,ccy)} | +{d:.1f}%")
 
-    # Si no hay nada relevante, mensaje corto.
-    meaningful = bool(newly_strong or existing_strong or portfolio_reduce_sell or portfolio_falls or near_strong)
-    if not meaningful:
-        msg.append(
-            "Sin alertas relevantes hoy: ninguna empresa en Compra Fuerte, "
-            "ninguna posición en zona Reducir/Venta y ninguna caída defensiva ≥7%."
-        )
+    # CARTERA COMPLETA
+    portfolio = [r for r in rows if r[7]]
+    portfolio.sort(key=lambda r:r[0])
+    if portfolio:
+        msg.append("\n<b>📌 CARTERA — SITUACIÓN V9</b>")
+        for r in portfolio:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+            if z == "SIN_UMBRAL":
+                status = "⚪ V9 pendiente"
+            elif z == "SIN_COTIZACION":
+                status = "⚠️ Sin cotización"
+            else:
+                status = ZONE_LABELS[z]
+            delta = f" | Δ {change_pct:+.1f}%" if change_pct is not None else ""
+            msg.append(f"• <b>{name}</b>: {fmt(price,ccy)} — {status}{delta}")
+
+    # ALERTAS DEFENSIVAS CARTERA
+    defensive = [r for r in rows if r[7] and (
+        r[10] in ("REDUCIR","VENTA") or
+        (r[13] is not None and r[13] <= -7.0)
+    )]
+    if defensive:
+        msg.append("\n<b>⚠️ CARTERA — REVISIÓN / SALIDA</b>")
+        for r in defensive:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+            if z in ("REDUCIR","VENTA"):
+                msg.append(f"• <b>{name}</b>: {fmt(price,ccy)} — {ZONE_LABELS[z]} por valoración.")
+            else:
+                msg.append(f"• <b>{name}</b>: {fmt(price,ccy)} | caída {change_pct:.1f}% — revisar tesis V9; no vender automáticamente.")
+
+    # WATCHLIST RESUMIDA: solo empresas con umbrales completos, agrupadas por zona.
+    complete_watch = [r for r in rows if not r[7] and all(v is not None for v in r[3:7])]
+    if complete_watch:
+        msg.append("\n<b>📋 WATCHLIST V9 — RESTO</b>")
+        for r in sorted(complete_watch, key=lambda r:(r[10],r[0])):
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+            msg.append(f"• {name}: {fmt(price,ccy)} — {ZONE_LABELS.get(z,z)}")
 
     ok_quotes = sum(1 for r in rows if r[9] is not None)
     complete = sum(1 for r in rows if all(v is not None for v in r[3:7]))
-    pending = len(rows) - complete
-
-    msg.append(
-        f"\nCobertura: {ok_quotes}/79"
-        f"\nUmbrales V9 completos: {complete}/79"
-        f"\nPendientes V9: {pending}"
-    )
+    pending = len(rows)-complete
+    msg.append(f"\n<b>RESUMEN</b>\nCotizaciones: {ok_quotes}/79\nUmbrales V9 completos: {complete}/79\nPendientes V9: {pending}")
 
     save_state(new_state)
     send_telegram("\n".join(msg))
