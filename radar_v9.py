@@ -109,66 +109,130 @@ def main():
         price = prices.get(symbol)
         z = "SIN_COTIZACION" if price is None else zone(price, strong, buy, reduce, sell)
         prev = previous.get(symbol, {}).get("zone")
+        prev_price = previous.get(symbol, {}).get("price")
         changed = prev is not None and prev != z
-        rows.append((name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed))
-        new_state[symbol] = {"zone":z,"price":price,"updated":datetime.now().isoformat()}
 
-    changed_rows = [r for r in rows if r[12] and r[10] not in ("SIN_UMBRAL","SIN_COTIZACION")]
-    changed_rows.sort(key=lambda r: (not r[7], r[0]))
+        # Cambio diario aproximado respecto a la última ejecución del radar.
+        change_pct = None
+        if price is not None and prev_price not in (None, 0):
+            change_pct = (price - prev_price) / prev_price * 100
 
-    active = [r for r in rows if r[10] in ("COMPRA_FUERTE","COMPRA","REDUCIR","VENTA")]
-    active.sort(key=lambda r: (not r[7], r[10] not in ("COMPRA_FUERTE","VENTA"), r[0]))
-
-    nearest = []
-    for r in rows:
-        name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed = r
-        if price is not None and buy is not None and z == "MANTENER":
-            d = (price-buy)/buy*100
-            if d >= 0:
-                nearest.append((d,r))
-    nearest.sort(key=lambda x:x[0])
-    nearest = nearest[:10]
+        rows.append(
+            (name, symbol, ccy, strong, buy, reduce, sell,
+             in_portfolio, note, price, z, prev, changed, change_pct)
+        )
+        new_state[symbol] = {
+            "zone": z,
+            "price": price,
+            "updated": datetime.now().isoformat()
+        }
 
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
-    msg = [f"<b>RADAR DIARIO V9 — 79 EMPRESAS</b>\n{now}\n"]
+    msg = [f"<b>RADAR V9 — ALERTAS IMPORTANTES</b>\n{now}\n"]
 
-    if changed_rows:
-        msg.append("<b>🔔 CAMBIOS DE ZONA</b>")
-        for r in changed_rows:
-            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed = r
+    # 1) Solo COMPRA FUERTE como señal de entrada.
+    strong_buy = [r for r in rows if r[10] == "COMPRA_FUERTE"]
+    strong_buy.sort(key=lambda r: (not r[7], r[0]))
+
+    newly_strong = [
+        r for r in strong_buy
+        if r[11] not in ("COMPRA_FUERTE", None)
+    ]
+
+    if newly_strong:
+        msg.append("<b>🚨 NUEVA COMPRA FUERTE</b>")
+        for r in newly_strong:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
             mark = " 📌 CARTERA" if in_portfolio else ""
-            prev_label = ZONE_LABELS.get(prev, prev or "—")
-            msg.append(f"• <b>{name}</b>{mark} — {prev_label} → {ZONE_LABELS[z]} — {fmt(price,ccy)}")
+            discount = ((strong - price) / strong * 100) if strong and price is not None else None
+            extra = f" | {abs(discount):.1f}% por debajo del umbral" if discount is not None and discount >= 0 else ""
+            msg.append(
+                f"• <b>{name}</b>{mark} — {fmt(price,ccy)}\n"
+                f"  Compra fuerte ≤ {fmt(strong,ccy)}{extra}"
+            )
 
-    portfolio_active = [r for r in active if r[7]]
-    if portfolio_active:
-        msg.append("\n<b>📌 CARTERA — SEÑALES ACTIVAS</b>")
-        for r in portfolio_active:
-            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed = r
-            msg.append(f"• <b>{name}</b> — {fmt(price,ccy)} — {ZONE_LABELS[z]}")
-
-    watch_active = [r for r in active if not r[7]]
-    if watch_active:
-        msg.append("\n<b>WATCHLIST — SEÑALES ACTIVAS</b>")
-        for r in watch_active:
-            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed = r
-            msg.append(f"• <b>{name}</b> — {fmt(price,ccy)} — {ZONE_LABELS[z]}")
-
-    if nearest:
-        msg.append("\n<b>🎯 MÁS CERCA DE COMPRA</b>")
-        for d,r in nearest:
-            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed = r
+    # Seguimos mostrando las que YA están en compra fuerte para que no se pierdan.
+    existing_strong = [
+        r for r in strong_buy
+        if r[11] == "COMPRA_FUERTE" or r[11] is None
+    ]
+    if existing_strong:
+        msg.append("\n<b>🟢 SIGUEN EN COMPRA FUERTE</b>")
+        for r in existing_strong:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
             mark = " 📌" if in_portfolio else ""
-            msg.append(f"• {name}{mark}: {fmt(price,ccy)} | compra ≤ {fmt(buy,ccy)} | +{d:.1f}%")
+            msg.append(
+                f"• {name}{mark}: {fmt(price,ccy)} | umbral ≤ {fmt(strong,ccy)}"
+            )
+
+    # 2) Posiciones en cartera: alertas defensivas.
+    # La valoración por sobreprecio (REDUCIR/VENTA) sí puede ser señal directa.
+    portfolio_reduce_sell = [
+        r for r in rows
+        if r[7] and r[10] in ("REDUCIR","VENTA")
+    ]
+    if portfolio_reduce_sell:
+        msg.append("\n<b>⚠️ CARTERA — REDUCIR / VENDER POR VALORACIÓN</b>")
+        for r in portfolio_reduce_sell:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+            threshold = sell if z == "VENTA" else reduce
+            msg.append(
+                f"• <b>{name}</b> — {fmt(price,ccy)} — {ZONE_LABELS[z]}\n"
+                f"  Umbral: {fmt(threshold,ccy)}"
+            )
+
+    # 3) Caídas fuertes en posiciones de cartera.
+    # NO ordenamos vender solo por precio: activamos revisión defensiva.
+    portfolio_falls = [
+        r for r in rows
+        if r[7] and r[13] is not None and r[13] <= -7.0
+    ]
+    if portfolio_falls:
+        portfolio_falls.sort(key=lambda r: r[13])
+        msg.append("\n<b>🛡️ CARTERA — CAÍDA FUERTE / REVISAR TESIS</b>")
+        for r in portfolio_falls:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+            msg.append(
+                f"• <b>{name}</b> — {fmt(price,ccy)} — {change_pct:.1f}% desde la última revisión\n"
+                f"  Revisar resultados/noticias y tesis V9 antes de decidir vender."
+            )
+
+    # 4) Empresas muy cerca de Compra Fuerte (máx. 5), no de compra normal.
+    near_strong = []
+    for r in rows:
+        name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+        if price is not None and strong is not None and price > strong:
+            d = (price - strong) / strong * 100
+            if d <= 10:
+                near_strong.append((d, r))
+    near_strong.sort(key=lambda x: x[0])
+    near_strong = near_strong[:5]
+
+    if near_strong:
+        msg.append("\n<b>🎯 CERCA DE COMPRA FUERTE</b>")
+        for d,r in near_strong:
+            name,symbol,ccy,strong,buy,reduce,sell,in_portfolio,note,price,z,prev,changed,change_pct = r
+            mark = " 📌" if in_portfolio else ""
+            msg.append(
+                f"• {name}{mark}: {fmt(price,ccy)} | fuerte ≤ {fmt(strong,ccy)} | +{d:.1f}%"
+            )
+
+    # Si no hay nada relevante, mensaje corto.
+    meaningful = bool(newly_strong or existing_strong or portfolio_reduce_sell or portfolio_falls or near_strong)
+    if not meaningful:
+        msg.append(
+            "Sin alertas relevantes hoy: ninguna empresa en Compra Fuerte, "
+            "ninguna posición en zona Reducir/Venta y ninguna caída defensiva ≥7%."
+        )
 
     ok_quotes = sum(1 for r in rows if r[9] is not None)
     complete = sum(1 for r in rows if all(v is not None for v in r[3:7]))
-    pending = len(rows)-complete
+    pending = len(rows) - complete
 
     msg.append(
-        f"\nCobertura cotizaciones: {ok_quotes}/79"
+        f"\nCobertura: {ok_quotes}/79"
         f"\nUmbrales V9 completos: {complete}/79"
-        f"\nPendientes de valoración V9: {pending}"
+        f"\nPendientes V9: {pending}"
     )
 
     save_state(new_state)
