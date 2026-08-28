@@ -8,9 +8,20 @@ on:
 jobs:
   radar:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Restore radar state
+        uses: actions/cache/restore@v4
+        with:
+          path: radar_state.json
+          key: radar-state-${{ github.run_id }}
+          restore-keys: |
+            radar-state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,3 +36,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python radar_v9.py
+
+      - name: Save radar state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: radar_state.json
+          key: radar-state-${{ github.run_id }}
